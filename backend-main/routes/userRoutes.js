@@ -1,0 +1,696 @@
+import express from 'express';
+import User from '../models/User.js';
+import bcrypt from 'bcryptjs';
+import crypto from 'crypto'; // For generating tokens
+import { sendVerificationEmail } from '../utils/emailService.js'; // For sending verification emails
+import generateToken from '../utils/generateToken.js';
+import { getBatchDetails } from "../controllers/billController.js"; // Assuming the batchDetails function is already implemented
+
+import jwt from 'jsonwebtoken';
+
+import { sendVerificationCodeEmail } from '../utils/emailService.js'; // Updated import
+import { isAuthenticated } from '../middleware/authMiddleware.js';
+import { validateEmail } from '../utils/validators.js';
+
+const router = express.Router();
+
+// Register Route
+// router.post('/register', async (req, res) => {
+//     const { name, email, password, confirmPassword, gstNo } = req.body;
+
+//     // Check if the passwords match
+//     if (password !== confirmPassword) {
+//         return res.status(400).json({ message: 'Passwords do not match' });
+//     }
+
+//     try {
+//         // Convert email to lowercase for case-insensitive storage
+//         const normalizedEmail = email.toLowerCase();
+
+//         // Check if the user already exists
+//         const userExists = await User.findOne({ email: normalizedEmail });
+//         if (userExists) {
+//             return res.status(400).json({ message: 'User already exists' });
+//         }
+
+//         // Hash the password
+//         const hashedPassword = await bcrypt.hash(password, 10);
+
+//         // Generate a verification token
+//         const verificationToken = crypto.randomBytes(32).toString('hex');
+
+//         // Create a new user instance
+//         const user = new User({
+//             name,
+//             email: normalizedEmail, // Save email as lowercase
+//             password: hashedPassword,
+//             gstNo,
+//             verificationToken, // Store the token for email verification
+//             isVerified: false, // Initially, the user is not verified
+//         });
+
+//         // Save the user to the database
+//         await user.save();
+
+//         // Send verification email
+//         await sendVerificationEmail(normalizedEmail, verificationToken);
+
+//         // Send a response to the client
+//         res.status(201).json({ message: 'User registered successfully. Please verify your email.' });
+//     } catch (error) {
+//         console.error(error);
+//         res.status(500).json({ message: 'Server error' });
+//     }
+// });
+
+// // Email Verification Route
+// router.get('/verify-email', async (req, res) => {
+//     const { token } = req.query;
+
+//     try {
+//         // Find the user with the provided verification token
+//         const user = await User.findOne({ verificationToken: token });
+
+//         if (!user) {
+//             return res.status(400).json({ message: 'Invalid or expired token' });
+//         }
+
+//         // Update the user's verification status
+//         user.isVerified = true;
+//         user.verificationToken = null; // Clear the token after verification
+//         await user.save();
+
+//         res.status(200).json({ message: 'Email verified successfully!' });
+//     } catch (error) {
+//         console.error(error);
+//         res.status(500).json({ message: 'Server error' });
+//     }
+// });
+
+// Registration Route with 6-digit verification code
+
+
+
+
+// User Registration Route with 6-digit verification
+router.use((req, res, next) => {
+    console.log('\n🔍 USER ROUTE DEBUG:');
+    console.log('Method:', req.method);
+    console.log('Path:', req.path);
+    console.log('Full URL:', req.originalUrl);
+    console.log('Headers:', {
+        'content-type': req.headers['content-type'],
+        'authorization': req.headers.authorization ? 'Present' : 'Missing',
+        'origin': req.headers.origin
+    });
+    console.log('Body:', req.body);
+    console.log('Query:', req.query);
+    console.log('Params:', req.params);
+    console.log('=====================================\n');
+    next();
+});
+
+// Test route to check if user routes are working
+router.get('/test', (req, res) => {
+    res.status(200).json({
+        success: true,
+        message: 'User routes are working!',
+        timestamp: new Date().toISOString(),
+        method: req.method,
+        path: req.path
+    });
+});
+
+// User Registration Route with enhanced debugging
+router.post('/register', async (req, res) => {
+    console.log('🚀 Registration attempt started');
+    console.log('Request body received:', req.body);
+    
+    try {
+        const { name, email, password, confirmPassword, gstNo } = req.body;
+
+        // Detailed validation logging
+        console.log('Extracted fields:', { 
+            name: name ? 'Present' : 'Missing', 
+            email: email ? 'Present' : 'Missing', 
+            password: password ? 'Present' : 'Missing', 
+            confirmPassword: confirmPassword ? 'Present' : 'Missing', 
+            gstNo: gstNo ? 'Present' : 'Missing' 
+        });
+
+        // Validate required fields
+        if (!name || !email || !password || !confirmPassword) {
+            console.log('❌ Missing required fields');
+            return res.status(400).json({ 
+                success: false,
+                message: 'All fields are required',
+                missingFields: {
+                    name: !name,
+                    email: !email,
+                    password: !password,
+                    confirmPassword: !confirmPassword
+                }
+            });
+        }
+
+        // Validate email format
+        if (!validateEmail(email)) {
+            console.log('❌ Invalid email format:', email);
+            return res.status(400).json({
+                success: false,
+                message: 'Please enter a valid email address (e.g. user@gmail.com)'
+            });
+        }
+
+        // Check if the passwords match
+        if (password !== confirmPassword) {
+            console.log('❌ Passwords do not match');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Passwords do not match' 
+            });
+        }
+
+        // Convert email to lowercase for case-insensitive storage
+        const normalizedEmail = email.toLowerCase().trim();
+        console.log('📧 Normalized email:', normalizedEmail);
+
+        // Check if the user already exists
+        console.log('🔍 Checking if user exists...');
+        const userExists = await User.findOne({ email: normalizedEmail });
+        if (userExists) {
+            if (userExists.isVerified) {
+                console.log('❌ User already exists and is verified');
+                return res.status(400).json({ 
+                    success: false,
+                    message: 'User already exists and is verified. Please log in.',
+                    isVerified: true
+                });
+            } else {
+                console.log('⚠️ User exists but is unverified. Updating user details & sending new verification code...');
+                const hashedPassword = await bcrypt.hash(password, 10);
+                const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+                const verificationExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+                userExists.name = name;
+                userExists.password = hashedPassword;
+                userExists.gstNo = gstNo;
+                userExists.verificationCode = verificationCode;
+                userExists.verificationExpires = verificationExpires;
+                await userExists.save();
+
+                const emailResult = await sendVerificationCodeEmail(normalizedEmail, verificationCode);
+                if (!emailResult?.success) {
+                    console.log('❌ Failed to send verification code to', normalizedEmail);
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Could not send verification email to this address. Please ensure the email address is valid and reachable.'
+                    });
+                }
+
+                return res.status(200).json({ 
+                    success: true,
+                    message: 'An unverified account with this email already exists. A new verification code has been sent to your email.',
+                    user: {
+                        email: normalizedEmail,
+                        name: name,
+                        isVerified: false
+                    },
+                    needsVerification: true
+                });
+            }
+        }
+
+        console.log('🔐 Hashing password...');
+        // Hash the password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        console.log('🎲 Generating verification code...');
+        // Generate a 6-digit verification code
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // Set expiration time (10 minutes from now)
+        const verificationExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+        console.log('👤 Creating user object...');
+        // Create a new user instance
+        const user = new User({
+            name,
+            email: normalizedEmail,
+            password: hashedPassword,
+            gstNo,
+            verificationCode,
+            verificationExpires,
+            isVerified: false,
+        });
+
+        console.log('💾 Saving user to database...');
+        // Save the user to the database
+        await user.save();
+        console.log('✅ User saved successfully');
+
+        console.log('📨 Sending verification email...');
+        // Send verification email with 6-digit code
+        const emailResult = await sendVerificationCodeEmail(normalizedEmail, verificationCode);
+        console.log('✅ Verification email step completed');
+
+        if (!emailResult?.success) {
+            console.log('❌ Failed to send verification code to', normalizedEmail);
+            return res.status(400).json({
+                success: false,
+                message: 'Could not send verification email to this address. Please ensure the email address is valid and reachable.'
+            });
+        }
+
+        // Send a response to the client
+        res.status(201).json({ 
+            success: true,
+            message: 'User registered successfully. Please check your email for verification code.',
+            user: {
+                email: normalizedEmail,
+                name: name,
+                isVerified: false
+            },
+            needsVerification: true
+        });
+        
+        console.log('✅ Registration completed successfully');
+    } catch (error) {
+        console.error('❌ Registration error:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error during registration',
+            error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+        });
+    }
+});
+
+// Email Verification Route with debugging
+router.post('/verify-email', async (req, res) => {
+    console.log('🔐 Email verification attempt started');
+    console.log('Request body:', req.body);
+    
+    const { email, verificationCode } = req.body;
+
+    // Validate input
+    if (!email || !verificationCode) {
+        console.log('❌ Missing email or verification code');
+        return res.status(400).json({ 
+            success: false,
+            message: 'Email and verification code are required',
+            received: { email: !!email, verificationCode: !!verificationCode }
+        });
+    }
+
+    try {
+        console.log('🔍 Looking for user with email and code...');
+        // Find the user with the provided email and verification code
+        const user = await User.findOne({ 
+            email: email.toLowerCase(),
+            verificationCode: verificationCode
+        });
+
+        if (!user) {
+            console.log('❌ Invalid verification code or email');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Invalid verification code or email' 
+            });
+        }
+
+        // Check if the verification code has expired
+        if (user.verificationExpires < new Date()) {
+            console.log('❌ Verification code has expired');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Verification code has expired. Please request a new one.' 
+            });
+        }
+
+        console.log('✅ Updating user verification status...');
+        // Update the user's verification status
+        user.isVerified = true;
+        user.verificationCode = null;
+        user.verificationExpires = null;
+        await user.save();
+
+        res.status(200).json({ 
+            success: true,
+            message: 'Email verified successfully! You can now log in.' 
+        });
+        
+        console.log('✅ Email verification completed successfully');
+    } catch (error) {
+        console.error('❌ Email verification error:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error during email verification' 
+        });
+    }
+});
+
+// Resend Verification Code Route with debugging
+router.post('/resend-verification', async (req, res) => {
+    console.log('🔄 Resend verification attempt started');
+    const { email } = req.body;
+
+    // Validate input
+    if (!email) {
+        console.log('❌ Missing email');
+        return res.status(400).json({ 
+            success: false,
+            message: 'Email is required' 
+        });
+    }
+
+    if (!validateEmail(email)) {
+        console.log('❌ Invalid email format:', email);
+        return res.status(400).json({ 
+            success: false,
+            message: 'Please enter a valid email address (e.g. user@gmail.com)' 
+        });
+    }
+
+    try {
+        console.log('🔍 Finding user...');
+        // Find the user
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+        if (!user) {
+            console.log('❌ User not found');
+            return res.status(400).json({ 
+                success: false,
+                message: 'User not found' 
+            });
+        }
+
+        if (user.isVerified) {
+            console.log('❌ Email already verified');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Email is already verified' 
+            });
+        }
+
+        console.log('🎲 Generating new verification code...');
+        // Generate a new 6-digit verification code
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // Set new expiration time (10 minutes from now)
+        const verificationExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+        // Update user with new code
+        user.verificationCode = verificationCode;
+        user.verificationExpires = verificationExpires;
+        await user.save();
+
+        console.log('📨 Resending verification email...');
+        // Send new verification email
+        const emailResult = await sendVerificationCodeEmail(email.toLowerCase().trim(), verificationCode);
+
+        if (!emailResult?.success) {
+            console.log('❌ Failed to resend verification code to', email);
+            return res.status(400).json({
+                success: false,
+                message: 'Could not send verification email to this address. Please ensure the email address is valid and reachable.'
+            });
+        }
+
+        res.status(200).json({ 
+            success: true,
+            message: 'Verification code resent successfully. Please check your email.'
+        });
+        
+        console.log('✅ Resend verification completed successfully');
+    } catch (error) {
+        console.error('❌ Resend verification error:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error during resending verification code' 
+        });
+    }
+});
+
+// Login Route with debugging
+router.post('/login', async (req, res) => {
+    console.log('🔑 Login attempt started');
+    const { email, password } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+        console.log('❌ Missing email or password');
+        return res.status(400).json({ 
+            success: false,
+            message: 'Email and password are required',
+            received: { email: !!email, password: !!password }
+        });
+    }
+
+    if (!validateEmail(email)) {
+        console.log('❌ Invalid email format:', email);
+        return res.status(400).json({ 
+            success: false,
+            message: 'Please enter a valid email address (e.g. user@gmail.com)' 
+        });
+    }
+
+    try {
+        console.log('🔍 Finding user by email...');
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+        if (!user) {
+            console.log('❌ User not found');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Invalid credentials' 
+            });
+        }
+
+        console.log('🔐 Comparing passwords...');
+        const isMatch = await bcrypt.compare(password, user.password);
+
+        if (!isMatch) {
+            console.log('❌ Password mismatch');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Invalid credentials' 
+            });
+        }
+
+        // Check if the user has verified their email
+        if (!user.isVerified) {
+            console.log('❌ Email not verified. Sending new verification code...');
+            // Generate a fresh verification code
+            const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+            const verificationExpires = new Date(Date.now() + 10 * 60 * 1000);
+            user.verificationCode = verificationCode;
+            user.verificationExpires = verificationExpires;
+            await user.save();
+
+            const emailResult = await sendVerificationCodeEmail(email.toLowerCase().trim(), verificationCode);
+
+            return res.status(400).json({ 
+                success: false,
+                message: emailResult?.success 
+                    ? 'Please verify your email before logging in. A new verification code has been sent to your email.'
+                    : 'Please verify your email before logging in. Could not send verification code email.',
+                needsVerification: true,
+                email: email.toLowerCase().trim()
+            });
+        }
+
+        console.log('🎫 Generating token...');
+        // Generate token for the authenticated user with both id and email
+        const token = generateToken(user._id, user.email);
+
+        // Send the token in the response
+        res.status(200).json({ 
+            success: true,
+            message: 'Login successful',
+            token: token, 
+            email: email.toLowerCase(),
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                gstNo: user.gstNo,
+                isVerified: user.isVerified
+            }
+        });
+        
+        console.log('✅ Login completed successfully');
+    } catch (error) {
+        console.error('❌ Login error:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error during login' 
+        });
+    }
+});
+
+// Get user profile (protected route) with debugging
+router.get('/profile', isAuthenticated, async (req, res) => {
+    console.log('👤 Profile request started');
+    console.log('User from token:', req.user);
+    
+    try {
+        const user = await User.findById(req.user.id).select('-password -verificationCode');
+        
+        if (!user) {
+            console.log('❌ User not found in database');
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                gstNo: user.gstNo,
+                isVerified: user.isVerified,
+                createdAt: user.createdAt
+            }
+        });
+        
+        console.log('✅ Profile fetched successfully');
+    } catch (error) {
+        console.error('❌ Profile fetch error:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error fetching profile' 
+        });
+    }
+});
+
+// Batch Details Route
+router.get('/batch-details', getBatchDetails);
+
+// Forgot Password - Request 6-digit reset code
+router.post('/forgot-password', async (req, res) => {
+    console.log('🔑 Forgot password request started');
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).json({
+            success: false,
+            message: 'Email is required'
+        });
+    }
+
+    if (!validateEmail(email)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Please enter a valid email address (e.g. user@gmail.com)'
+        });
+    }
+
+    try {
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'No account found with this email address'
+            });
+        }
+
+        const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const verificationExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+        user.verificationCode = resetCode;
+        user.verificationExpires = verificationExpires;
+
+        const emailResult = await sendVerificationCodeEmail(email.toLowerCase().trim(), resetCode);
+
+        if (!emailResult?.success) {
+            // Do not leave a newly-generated usable reset code in the database
+            // when delivery failed.
+            user.verificationCode = null;
+            user.verificationExpires = null;
+            return res.status(400).json({
+                success: false,
+                message: 'Could not send the reset code email. Please try again shortly.'
+            });
+        }
+
+        await user.save();
+
+        res.status(200).json({
+            success: true,
+            message: 'Password reset code sent to your email. Please check your inbox.',
+            email: email.toLowerCase().trim()
+        });
+    } catch (error) {
+        console.error('❌ Forgot password error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while processing forgot password request'
+        });
+    }
+});
+
+// Reset Password - Submit code and new password
+router.post('/reset-password', async (req, res) => {
+    console.log('🔄 Reset password request started');
+    const { email, resetCode, newPassword, confirmPassword } = req.body;
+
+    if (!email || !resetCode || !newPassword) {
+        return res.status(400).json({
+            success: false,
+            message: 'Email, reset code, and new password are required'
+        });
+    }
+
+    if (newPassword !== confirmPassword) {
+        return res.status(400).json({
+            success: false,
+            message: 'Passwords do not match'
+        });
+    }
+
+    try {
+        const user = await User.findOne({
+            email: email.toLowerCase(),
+            verificationCode: resetCode
+        });
+
+        if (!user) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid reset code or email'
+            });
+        }
+
+        if (user.verificationExpires && user.verificationExpires < new Date()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Reset code has expired. Please request a new one.'
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        user.password = hashedPassword;
+        user.verificationCode = null;
+        user.verificationExpires = null;
+        user.isVerified = true;
+        await user.save();
+
+        res.status(200).json({
+            success: true,
+            message: 'Password updated successfully! You can now log in.'
+        });
+    } catch (error) {
+        console.error('❌ Reset password error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while resetting password'
+        });
+    }
+});
+
+export default router;
